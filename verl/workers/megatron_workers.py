@@ -135,9 +135,9 @@ class ActorRolloutRefWorker(MegatronWorker):
                                enable_gradient_checkpointing=False):
         from verl.utils.megatron.optimizer import get_megatron_optimizer
         from megatron.core.models.gpt.gpt_model import ModelType
-        from verl.utils.model import print_model_size, update_model_config
+        from verl.utils.model import print_model_size, update_model_config, get_generation_config
         from verl.utils.megatron_utils import get_model, init_megatron_optim_config
-        from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
+        from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig, GenerationConfig
 
         # Step 1: initialize the tokenizer
         local_path = copy_local_path_from_hdfs(model_path)
@@ -145,6 +145,8 @@ class ActorRolloutRefWorker(MegatronWorker):
 
         # Step 2: get the actor_model_config
         actor_model_config = AutoConfig.from_pretrained(local_path)
+
+        self.generation_config = get_generation_config(local_path)
 
         override_config_kwargs = {
             'bos_token_id': self.tokenizer.bos_token_id,
@@ -221,7 +223,7 @@ class ActorRolloutRefWorker(MegatronWorker):
 
     def _build_rollout(self):
         if self.config.rollout.name == 'vllm':
-            from verl.workers.rollout.vllm_rollout import vLLMRollout
+            from verl.workers.rollout.vllm_rollout import vLLMRollout, vllm_mode
             from verl.workers.sharding_manager import MegatronVLLMShardingManager
             from verl.utils.model import normalize_pp_vpp_params
 
@@ -245,6 +247,7 @@ class ActorRolloutRefWorker(MegatronWorker):
             params = normalize_pp_vpp_params(params=params,
                                              num_hidden_layers=self.actor_model_config.num_hidden_layers,
                                              layer_name='layers')
+            assert vllm_mode == 'customized', "Support for vllm>=0.7 for Megatron-LM backend has not been implemented yet."
             rollout = vLLMRollout(actor_module=params,
                                   config=self.config.rollout,
                                   tokenizer=self.tokenizer,
@@ -352,7 +355,14 @@ class ActorRolloutRefWorker(MegatronWorker):
         assert self._is_rollout
 
         prompts.batch = prompts.batch.cuda()
-        meta_info = {'eos_token_id': self.tokenizer.eos_token_id, 'pad_token_id': self.tokenizer.pad_token_id}
+        meta_info = {
+            'eos_token_id':
+                self.generation_config.eos_token_id
+                if self.generation_config is not None else self.tokenizer.eos_token_id,
+            'pad_token_id':
+                self.generation_config.pad_token_id
+                if self.generation_config is not None else self.tokenizer.pad_token_id,
+        }
         prompts.meta_info.update(meta_info)
         with self.sharding_manager:
             log_gpu_memory_usage('After entering sharding manager', logger=logger)
@@ -406,15 +416,15 @@ class ActorRolloutRefWorker(MegatronWorker):
         return output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def load_checkpoint(self, checkpoint_path):
+    def load_checkpoint(self, checkpoint_path, **kwargs):
         pass
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def load_pretrained_model(self, checkpoint_path):
+    def load_pretrained_model(self, checkpoint_path, **kwargs):
         pass
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def save_checkpoint(self, checkpoint_path):
+    def save_checkpoint(self, checkpoint_path, **kwargs):
         assert self._is_actor
         pass
 
@@ -581,11 +591,11 @@ class CriticWorker(MegatronWorker):
         return output
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def load_checkpoint(self, checkpoint_path):
+    def load_checkpoint(self, checkpoint_path, **kwargs):
         pass
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def save_checkpoint(self, checkpoint_path):
+    def save_checkpoint(self, checkpoint_path, **kwargs):
         pass
 
 
